@@ -20,10 +20,11 @@ void buildPyramidGPU(const cv::cuda::GpuMat& img0,
     const int pad_y = winSize.height;
 
     /* ---------- level‑0 ---------- */
-    // 同步版调用，使用默认 Stream::Null()
+    // 使用传入的 CUDA stream
     cv::cuda::copyMakeBorder(img0, pyr[0],
                              pad_y, pad_y, pad_x, pad_x,
-                             cv::BORDER_REFLECT101);
+                             cv::BORDER_REFLECT101,
+                             cv::Scalar(), stream);
 
     /* ---------- 后续层 ---------- */
     cv::Size roi_sz(img0.cols, img0.rows);
@@ -39,10 +40,11 @@ void buildPyramidGPU(const cv::cuda::GpuMat& img0,
         cv::cuda::GpuMat half_roi;
         cv::cuda::pyrDown(prev_roi, half_roi, stream);
 
-        // ③ 再补边（仍同步调用）
+        // ③ 再补边（使用同一 stream）
         cv::cuda::copyMakeBorder(half_roi, pyr[l],
                                  pad_y, pad_y, pad_x, pad_x,
-                                 cv::BORDER_REFLECT101);
+                                 cv::BORDER_REFLECT101,
+                                 cv::Scalar(), stream);
 
         roi_sz = half;
     }
