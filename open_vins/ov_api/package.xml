@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+    <name>ov_api</name>
+    <version>0.1.0</version>
+    <description>Header-only API wrapper for OpenVINS</description>
+    <maintainer email="example@example.com">OpenVINS Contributors</maintainer>
+    <license>GPLv3</license>
+
+    <buildtool_depend condition="$ROS_VERSION == 1">catkin</buildtool_depend>
+    <buildtool_depend condition="$ROS_VERSION == 2">ament_cmake</buildtool_depend>
+
+    <depend>ov_msckf</depend>
+    <depend>ov_core</depend>
+
+    <export>
+        <build_type condition="$ROS_VERSION == 1">catkin</build_type>
+        <build_type condition="$ROS_VERSION == 2">ament_cmake</build_type>
+    </export>
+</package>
+
