@@ -162,7 +162,7 @@ details on what the system supports.
 
 ## C++ API Wrapper
 A minimal header-only wrapper is available in `ov_api`.
-Include `openvins_api.hpp` in your project and construct `openvins_api::OpenVINS` with a configuration file.
+Include `openvins_api.hpp` in your project and construct `openvins_api::OpenVINS` with a configuration file. A compilable example `example_api.cpp` lives in the repository root.
 
 ## Credit / Licensing
 
