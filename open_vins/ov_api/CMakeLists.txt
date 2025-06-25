@@ -13,6 +13,9 @@ include_directories(
     ${catkin_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIRS}
     ${OPENVINS_ROOT}
+    ${OPENVINS_ROOT}/ov_core/src
+    ${OPENVINS_ROOT}/ov_msckf/src
+    ${OPENVINS_ROOT}/ov_init/src
     ${OPENVINS_ROOT}/ov_api/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
