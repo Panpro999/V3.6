@@ -12,7 +12,7 @@
 #include <string>
 
 #include "ov_api/openvins_api.hpp"
-#include "ov_msckf/src/state/State.h"
+#include "state/State.h"
 
 namespace openvins_api {
 
