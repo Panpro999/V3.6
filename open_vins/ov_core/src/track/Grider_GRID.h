@@ -101,61 +101,60 @@ public:
     }
     CV_Assert(gray.type() == CV_8UC1);
 
-    /* ---------- 3. upload grayscale to GPU ---------- */
+    /* ---------- 3. upload grayscale (and mask) to GPU ---------- */
     cv::cuda::GpuMat d_img(gray);
+    cv::cuda::GpuMat d_mask;
+    if (!mask.empty()) d_mask.upload(mask);
 
-    /* ---------- 4. GPU FAST (先不传掩膜，仅做最简检测) ---------- */
-    // 如果你后面需要恢复掩膜，可以把 detectAsync 的第三个参数换成 d_mask
+    /* ---------- 4. GPU FAST per grid ---------- */
     auto fast_gpu = cv::cuda::FastFeatureDetector::create(
-      // 先把阈值调小一半试试，如果确实能检测到再改回
-      std::max(threshold / 2, 5),
-      nonmaxSuppression,
-      cv::FastFeatureDetector::TYPE_9_16,
-      20000  // maxKeyPoints
+        std::max(threshold / 2, 5),
+        nonmaxSuppression,
+        cv::FastFeatureDetector::TYPE_9_16,
+        num_features_grid
     );
 
     cv::cuda::Stream stream;
-    cv::cuda::GpuMat d_kps;               // GPU 上存储 keypoints 的缓冲
-    std::vector<cv::KeyPoint> kps_host;   // 拷回 CPU 的 keypoints
-
-    // 第三个参数改成空，即先不传入掩膜
-    fast_gpu->detectAsync(d_img, d_kps, cv::cuda::GpuMat(), stream);
-    stream.waitForCompletion();
-    fast_gpu->convert(d_kps, kps_host);
-
-    if (kps_host.empty()) {
-      // GPU FAST 没检测到任何点，说明阈值还是过高，或图像不适合 CUDA FAST
-      // 这时就只能退回 CPU 版，或者再调更低阈值
-      return;
-    }
-
-    /* ---------- 5. bucket by grid ---------- */
-    std::vector<std::vector<cv::KeyPoint>> buckets(valid_locs.size());
-    for (const auto &kp : kps_host) {
-      int gx = kp.pt.x / size_x;
-      int gy = kp.pt.y / size_y;
-      gx = std::min(grid_x - 1, std::max(0, gx));
-      gy = std::min(grid_y - 1, std::max(0, gy));
-
-      auto it = std::find(valid_locs.begin(), valid_locs.end(), std::make_pair(gx, gy));
-      if (it == valid_locs.end()) continue;
-
-      int idx = static_cast<int>(std::distance(valid_locs.begin(), it));
-      buckets[idx].push_back(kp);
-    }
-
-    /* ---------- 6. collect top keypoints per bucket ---------- */
     pts.clear();
-    for (auto &vec : buckets) {
-      if (vec.empty()) continue;
-      std::sort(vec.begin(), vec.end(),
-                [](const cv::KeyPoint &a, const cv::KeyPoint &b) {
-                  return a.response > b.response;
-                });
-      if (vec.size() > (size_t)num_features_grid) {
-        vec.resize(num_features_grid);
+    for (const auto &loc : valid_locs) {
+      int gx = loc.first;
+      int gy = loc.second;
+
+      cv::Rect roi(gx * size_x, gy * size_y,
+                   std::min(size_x, img.cols - gx * size_x),
+                   std::min(size_y, img.rows - gy * size_y));
+      if (roi.width <= 0 || roi.height <= 0) continue;
+
+      cv::cuda::GpuMat d_roi(d_img, roi);
+      cv::cuda::GpuMat d_mask_roi;
+      if (!mask.empty()) d_mask_roi = cv::cuda::GpuMat(d_mask, roi);
+
+      cv::cuda::GpuMat d_kps;
+      fast_gpu->detectAsync(d_roi, d_kps,
+                            mask.empty() ? cv::cuda::GpuMat() : d_mask_roi,
+                            stream);
+      stream.waitForCompletion();
+      std::vector<cv::KeyPoint> kps;
+      fast_gpu->convert(d_kps, kps);
+      if (kps.empty()) continue;
+
+      std::sort(kps.begin(), kps.end(), compare_response);
+      if (kps.size() > (size_t)num_features_grid) {
+        kps.resize(num_features_grid);
       }
-      pts.insert(pts.end(), vec.begin(), vec.end());
+
+      for (auto &kp : kps) {
+        kp.pt.x += roi.x;
+        kp.pt.y += roi.y;
+        pts.push_back(kp);
+      }
+
+      if ((int)pts.size() >= num_features) break;
+    }
+
+    if (pts.size() > (size_t)num_features) {
+      std::sort(pts.begin(), pts.end(), compare_response);
+      pts.resize(num_features);
     }
 
     if (pts.empty()) {
