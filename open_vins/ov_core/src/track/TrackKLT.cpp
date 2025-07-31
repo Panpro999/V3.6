@@ -470,10 +470,6 @@ void TrackKLT::perform_detection_monocular(const std::vector<cv::Mat> &img0pyr, 
     it1++;
   }
 
-  updateMaskGPU(d_mask0, kept_kpts0, min_px_dist, cv_stream_);
-  d_mask0.download(mask0_updated, cv_stream_);
-  cv_stream_.waitForCompletion();
-
   // Update mask on GPU for kept keypoints
   updateMaskGPU(d_mask, kept_kpts, min_px_dist, cv_stream_);
   d_mask.download(mask0_updated, cv_stream_);
