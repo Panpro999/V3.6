@@ -23,6 +23,7 @@
 #define OV_CORE_TRACK_DESC_H
 
 #include "TrackBase.h"
+#include <opencv2/cudafeatures2d.hpp>
 
 namespace ov_core {
 
@@ -151,6 +152,7 @@ protected:
 
   // Our descriptor matcher
   cv::Ptr<cv::DescriptorMatcher> matcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
+  cv::Ptr<cv::cuda::DescriptorMatcher> matcher_gpu = cv::cuda::DescriptorMatcher::createBFMatcher(cv::NORM_HAMMING);
 
   // Parameters for our FAST grid detector
   int threshold;

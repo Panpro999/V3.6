@@ -21,6 +21,7 @@
 
 #include "TrackDescriptor.h"
 
+#include <opencv2/cudafeatures2d.hpp>
 #include <opencv2/features2d.hpp>
 
 #include "Grider_FAST.h"
@@ -483,9 +484,10 @@ void TrackDescriptor::robust_match(const std::vector<cv::KeyPoint> &pts0, const 
   // Our 1to2 and 2to1 match vectors
   std::vector<std::vector<cv::DMatch>> matches0to1, matches1to0;
 
-  // Match descriptors (return 2 nearest neighbours)
-  matcher->knnMatch(desc0, desc1, matches0to1, 2);
-  matcher->knnMatch(desc1, desc0, matches1to0, 2);
+  // Match descriptors using GPU (return 2 nearest neighbours)
+  cv::cuda::GpuMat d0(desc0), d1(desc1);
+  matcher_gpu->knnMatch(d0, d1, matches0to1, 2);
+  matcher_gpu->knnMatch(d1, d0, matches1to0, 2);
 
   // Do a ratio test for both matches
   robust_ratio_test(matches0to1);

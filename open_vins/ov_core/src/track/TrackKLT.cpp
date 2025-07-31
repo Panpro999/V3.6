@@ -7,6 +7,7 @@
 #include "cam/CamBase.h"
 #include "feat/Feature.h"
 #include "feat/FeatureDatabase.h"
+#include "pzj/mask_gpu.h"
 #include "utils/opencv_lambda_body.h"
 #include "utils/print.h"
 #include <opencv2/cudaimgproc.hpp>
@@ -49,43 +50,36 @@ void TrackKLT::feed_new_camera(const CameraData &message) {
       img = message.images.at(msg_id);
     }
 
+    // ---------- GPU 构建图像金字塔 ----------
+    cv::cuda::GpuMat d_img;
+    d_img.upload(img, cv_stream_); // 1. 上传
 
-// ---------- GPU 构建图像金字塔 ----------
-cv::cuda::GpuMat d_img;
-d_img.upload(img, cv_stream_);                              // 1. 上传
+    const cv::Size win_size(21, 21); // 与 LK 光流一致
+    const int pad_x = win_size.width;
+    const int pad_y = win_size.height;
 
-const cv::Size win_size(21, 21);                            // 与 LK 光流一致
-const int pad_x = win_size.width;
-const int pad_y = win_size.height;
+    std::vector<cv::cuda::GpuMat> d_pyr;
+    ov_core::buildPyramidGPU(d_img, d_pyr,
+                             pyr_levels + 1, // levels = N + 1 (含 level-0)
+                             win_size, cv_stream_);
 
-std::vector<cv::cuda::GpuMat> d_pyr;
-ov_core::buildPyramidGPU(d_img, d_pyr,
-                         pyr_levels + 1,    // levels = N + 1 (含 level-0)
-                         win_size,
-                         cv_stream_);
+    d_img_pyramid_curr_[cam_id] = std::move(d_pyr); // 2. 保存 GPU 版
 
-d_img_pyramid_curr_[cam_id] = std::move(d_pyr);             // 2. 保存 GPU 版
+    // ---------- 下载到 CPU，并调整 ROI 偏移 ----------
+    img_pyramid_curr[cam_id].resize(pyr_levels + 1);
 
-// ---------- 下载到 CPU，并调整 ROI 偏移 ----------
-img_pyramid_curr[cam_id].resize(pyr_levels + 1);
+    for (int l = 0; l <= pyr_levels; ++l) {
+      // 下载整幅 padded 图
+      d_img_pyramid_curr_[cam_id][l].download(img_pyramid_curr[cam_id][l], cv_stream_);
 
-for (int l = 0; l <= pyr_levels; ++l)
-{
-    // 下载整幅 padded 图
-    d_img_pyramid_curr_[cam_id][l]
-        .download(img_pyramid_curr[cam_id][l], cv_stream_);
+      // ★★ 关键：收回 ROI，但保留外围内存 ★★
+      img_pyramid_curr[cam_id][l].adjustROI(-pad_y, -pad_y, -pad_x, -pad_x);
+    }
 
-    // ★★ 关键：收回 ROI，但保留外围内存 ★★
-    img_pyramid_curr[cam_id][l]
-        .adjustROI(-pad_y, -pad_y, -pad_x, -pad_x);
-}
+    cv_stream_.waitForCompletion(); // 3. 同步
 
-cv_stream_.waitForCompletion();                             // 3. 同步
-
-// 保存原始灰度图（CPU）
-img_curr[cam_id] = img;
-
-
+    // 保存原始灰度图（CPU）
+    img_curr[cam_id] = img;
   }
 
   // Either call our stereo or monocular version
@@ -419,6 +413,8 @@ void TrackKLT::perform_detection_monocular(const std::vector<cv::Mat> &img0pyr, 
   cv::Size size_grid(grid_x, grid_y); // width x height
   cv::Mat grid_2d_grid = cv::Mat::zeros(size_grid, CV_8UC1);
   cv::Mat mask0_updated = mask0.clone();
+  cv::cuda::GpuMat d_mask(mask0_updated);
+  std::vector<cv::KeyPoint> kept_kpts;
   auto it0 = pts0.begin();
   auto it1 = ids0.begin();
   while (it0 != pts0.end()) {
@@ -468,13 +464,20 @@ void TrackKLT::perform_detection_monocular(const std::vector<cv::Mat> &img0pyr, 
     }
     // Append this to the local mask of the image
     if (x - min_px_dist >= 0 && x + min_px_dist < img0pyr.at(0).cols && y - min_px_dist >= 0 && y + min_px_dist < img0pyr.at(0).rows) {
-      cv::Point pt1(x - min_px_dist, y - min_px_dist);
-      cv::Point pt2(x + min_px_dist, y + min_px_dist);
-      cv::rectangle(mask0_updated, pt1, pt2, cv::Scalar(255), -1);
+      kept_kpts.emplace_back(kpt);
     }
     it0++;
     it1++;
   }
+
+  updateMaskGPU(d_mask0, kept_kpts0, min_px_dist, cv_stream_);
+  d_mask0.download(mask0_updated, cv_stream_);
+  cv_stream_.waitForCompletion();
+
+  // Update mask on GPU for kept keypoints
+  updateMaskGPU(d_mask, kept_kpts, min_px_dist, cv_stream_);
+  d_mask.download(mask0_updated, cv_stream_);
+  cv_stream_.waitForCompletion();
 
   // First compute how many more features we need to extract from this image
   // If we don't need any features, just return
@@ -555,6 +558,8 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
   cv::Size size_grid0(grid_x, grid_y); // width x height
   cv::Mat grid_2d_grid0 = cv::Mat::zeros(size_grid0, CV_8UC1);
   cv::Mat mask0_updated = mask0.clone();
+  cv::cuda::GpuMat d_mask0(mask0_updated);
+  std::vector<cv::KeyPoint> kept_kpts0;
   auto it0 = pts0.begin();
   auto it1 = ids0.begin();
   while (it0 != pts0.end()) {
@@ -602,11 +607,9 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
     if (grid_2d_grid0.at<uint8_t>(y_grid, x_grid) < 255) {
       grid_2d_grid0.at<uint8_t>(y_grid, x_grid) += 1;
     }
-    // Append this to the local mask of the image
+    // Append this to the local mask of the image (GPU)
     if (x - min_px_dist >= 0 && x + min_px_dist < img0pyr.at(0).cols && y - min_px_dist >= 0 && y + min_px_dist < img0pyr.at(0).rows) {
-      cv::Point pt1(x - min_px_dist, y - min_px_dist);
-      cv::Point pt2(x + min_px_dist, y + min_px_dist);
-      cv::rectangle(mask0_updated, pt1, pt2, cv::Scalar(255), -1);
+      kept_kpts0.emplace_back(kpt);
     }
     it0++;
     it1++;
@@ -732,6 +735,8 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
   cv::Size size_grid1(grid_x, grid_y); // width x height
   cv::Mat grid_2d_grid1 = cv::Mat::zeros(size_grid1, CV_8UC1);
   cv::Mat mask1_updated = mask0.clone();
+  cv::cuda::GpuMat d_mask1(mask1_updated);
+  std::vector<cv::KeyPoint> kept_kpts1;
   it0 = pts1.begin();
   it1 = ids1.begin();
   while (it0 != pts1.end()) {
@@ -782,15 +787,17 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
     if (grid_2d_grid1.at<uint8_t>(y_grid, x_grid) < 255) {
       grid_2d_grid1.at<uint8_t>(y_grid, x_grid) += 1;
     }
-    // Append this to the local mask of the image
+    // Append this to the local mask of the image (GPU)
     if (x - min_px_dist >= 0 && x + min_px_dist < img1pyr.at(0).cols && y - min_px_dist >= 0 && y + min_px_dist < img1pyr.at(0).rows) {
-      cv::Point pt1(x - min_px_dist, y - min_px_dist);
-      cv::Point pt2(x + min_px_dist, y + min_px_dist);
-      cv::rectangle(mask1_updated, pt1, pt2, cv::Scalar(255), -1);
+      kept_kpts1.emplace_back(kpt);
     }
     it0++;
     it1++;
   }
+
+  updateMaskGPU(d_mask1, kept_kpts1, min_px_dist, cv_stream_);
+  d_mask1.download(mask1_updated, cv_stream_);
+  cv_stream_.waitForCompletion();
 
   // RIGHT: if we need features we should extract them in the current frame
   // RIGHT: note that we don't track them to the left as we already did left->right tracking above
@@ -839,25 +846,26 @@ void TrackKLT::perform_detection_stereo(const std::vector<cv::Mat> &img0pyr, con
   }
 }
 
-void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr,
-                                const std::vector<cv::Mat> &img1pyr,
-                                std::vector<cv::KeyPoint> &kpts0,
-                                std::vector<cv::KeyPoint> &kpts1,
-                                size_t id0, size_t id1,
-                                std::vector<uchar> &mask_out) {
+void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr, const std::vector<cv::Mat> &img1pyr, std::vector<cv::KeyPoint> &kpts0,
+                                std::vector<cv::KeyPoint> &kpts1, size_t id0, size_t id1, std::vector<uchar> &mask_out) {
   assert(kpts0.size() == kpts1.size());
-  if (kpts0.empty()) return;
+  if (kpts0.empty())
+    return;
 
   // 1) 上传金字塔到 GPU
   std::vector<cv::cuda::GpuMat> d_prev, d_curr;
   for (size_t l = 0; l < img0pyr.size(); ++l) {
-    d_prev.emplace_back(); d_prev.back().upload(img0pyr[l], cv_stream_);
-    d_curr.emplace_back(); d_curr.back().upload(img1pyr[l], cv_stream_);
+    d_prev.emplace_back();
+    d_prev.back().upload(img0pyr[l], cv_stream_);
+    d_curr.emplace_back();
+    d_curr.back().upload(img1pyr[l], cv_stream_);
   }
 
   // 2) 准备特征点（1×N）并声明所有输出
-  std::vector<cv::Point2f> pts0f; pts0f.reserve(kpts0.size());
-  for (auto &kp : kpts0) pts0f.push_back(kp.pt);
+  std::vector<cv::Point2f> pts0f;
+  pts0f.reserve(kpts0.size());
+  for (auto &kp : kpts0)
+    pts0f.push_back(kp.pt);
   int N = (int)pts0f.size();
   cv::Mat ptsMat = cv::Mat(pts0f).reshape(2, 1);
 
@@ -869,11 +877,10 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr,
     gpu_lk_ = cv::cuda::SparsePyrLKOpticalFlow::create(win_size, pyr_levels);
   gpu_lk_->calc(d_prev, d_curr, d_pts0, d_pts1, d_status, d_error, cv_stream_);
 
-
   // 4) 下载状态和新点
   cv::Mat status_mat, pts1_mat;
   d_status.download(status_mat, cv_stream_);
-  d_pts1.download(pts1_mat,   cv_stream_);
+  d_pts1.download(pts1_mat, cv_stream_);
   cv_stream_.waitForCompletion();
 
   // 5) 填回 mask_klt 和 kpts1
@@ -895,11 +902,11 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr,
   }
 
   // 7) RANSAC 剔除外点
-  double f0 = std::max(camera_calib.at(id0)->get_K()(0,0), camera_calib.at(id0)->get_K()(1,1));
-  double f1 = std::max(camera_calib.at(id1)->get_K()(0,0), camera_calib.at(id1)->get_K()(1,1));
+  double f0 = std::max(camera_calib.at(id0)->get_K()(0, 0), camera_calib.at(id0)->get_K()(1, 1));
+  double f1 = std::max(camera_calib.at(id1)->get_K()(0, 0), camera_calib.at(id1)->get_K()(1, 1));
   double fmax = std::max(f0, f1);
   std::vector<uchar> mask_rsc;
-  cv::findFundamentalMat(pts0_n, pts1_n, cv::FM_RANSAC, 2.0/fmax, 0.999, mask_rsc);
+  cv::findFundamentalMat(pts0_n, pts1_n, cv::FM_RANSAC, 2.0 / fmax, 0.999, mask_rsc);
 
   // 8) 合并 mask_klt 与 mask_rsc，输出到 mask_out
   mask_out.resize(pts0f.size());
@@ -909,4 +916,3 @@ void TrackKLT::perform_matching(const std::vector<cv::Mat> &img0pyr,
 
   // 9) 更新 kpts0（已在 feed 中更新）和 kpts1 的 pt 已在第5步更新完毕
 }
-
