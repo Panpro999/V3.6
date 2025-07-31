@@ -66,6 +66,8 @@ list(APPEND LIBRARY_SOURCES
         src/feat/FeatureInitializer.cpp
         src/utils/print.cpp
         src/pzj/pyramid_gpu.cpp
+        src/pzj/subpix_gpu.cpp
+        src/pzj/mask_gpu.cpp
 )
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
 

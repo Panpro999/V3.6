@@ -14,9 +14,11 @@
 
 #include "utils/opencv_lambda_body.h"
 
-#include <opencv2/cudafeatures2d.hpp>   // GPU 版 FastFeatureDetector
-#include <opencv2/cudaimgproc.hpp>      // 如果后续需要做 GPU 级预处理
+#include "pzj/mask_gpu.h"
+#include "pzj/subpix_gpu.h"
 #include <opencv2/core/cuda_stream_accessor.hpp> // 可选：访问底层 cudaStream_t
+#include <opencv2/cudafeatures2d.hpp>            // GPU 版 FastFeatureDetector
+#include <opencv2/cudaimgproc.hpp>               // 如果后续需要做 GPU 级预处理
 
 using cv::cuda::GpuMat;
 using cv::cuda::Stream;
@@ -41,9 +43,7 @@ public:
    * We want to have the keypoints with the highest values!
    * See: https://stackoverflow.com/a/10910921
    */
-  static bool compare_response(const cv::KeyPoint &first, const cv::KeyPoint &second) {
-    return first.response > second.response;
-  }
+  static bool compare_response(const cv::KeyPoint &first, const cv::KeyPoint &second) { return first.response > second.response; }
 
   /**
    * @brief This function will perform grid extraction using FAST.
@@ -60,15 +60,9 @@ public:
    * Given a specified grid size, this will try to extract fast features from each grid.
    * It will then return the best from each grid in the return vector.
    */
-  static void perform_griding(const cv::Mat &img,
-                              const cv::Mat &mask,
-                              const std::vector<std::pair<int,int>> &valid_locs,
-                              std::vector<cv::KeyPoint> &pts,
-                              int num_features,
-                              int grid_x, int grid_y,
-                              int threshold,
-                              bool nonmaxSuppression)
-  {
+  static void perform_griding(const cv::Mat &img, const cv::Mat &mask, const std::vector<std::pair<int, int>> &valid_locs,
+                              std::vector<cv::KeyPoint> &pts, int num_features, int grid_x, int grid_y, int threshold,
+                              bool nonmaxSuppression) {
     /* ---------- 0. quick exit ---------- */
     if (valid_locs.empty()) {
       return;
@@ -77,8 +71,8 @@ public:
     /* ---------- 1. adjust grid ---------- */
     if (num_features < grid_x * grid_y) {
       double r = (double)grid_x / (double)grid_y;
-      grid_y   = (int)std::ceil(std::sqrt(num_features / r));
-      grid_x   = (int)std::ceil(grid_y * r);
+      grid_y = (int)std::ceil(std::sqrt(num_features / r));
+      grid_x = (int)std::ceil(grid_y * r);
     }
     int num_features_grid = (int)((double)num_features / (grid_x * grid_y)) + 1;
 
@@ -107,16 +101,14 @@ public:
     /* ---------- 4. GPU FAST (先不传掩膜，仅做最简检测) ---------- */
     // 如果你后面需要恢复掩膜，可以把 detectAsync 的第三个参数换成 d_mask
     auto fast_gpu = cv::cuda::FastFeatureDetector::create(
-      // 先把阈值调小一半试试，如果确实能检测到再改回
-      std::max(threshold / 2, 5),
-      nonmaxSuppression,
-      cv::FastFeatureDetector::TYPE_9_16,
-      20000  // maxKeyPoints
+        // 先把阈值调小一半试试，如果确实能检测到再改回
+        std::max(threshold / 2, 5), nonmaxSuppression, cv::FastFeatureDetector::TYPE_9_16,
+        20000 // maxKeyPoints
     );
 
     cv::cuda::Stream stream;
-    cv::cuda::GpuMat d_kps;               // GPU 上存储 keypoints 的缓冲
-    std::vector<cv::KeyPoint> kps_host;   // 拷回 CPU 的 keypoints
+    cv::cuda::GpuMat d_kps;             // GPU 上存储 keypoints 的缓冲
+    std::vector<cv::KeyPoint> kps_host; // 拷回 CPU 的 keypoints
 
     // 第三个参数改成空，即先不传入掩膜
     fast_gpu->detectAsync(d_img, d_kps, cv::cuda::GpuMat(), stream);
@@ -138,7 +130,8 @@ public:
       gy = std::min(grid_y - 1, std::max(0, gy));
 
       auto it = std::find(valid_locs.begin(), valid_locs.end(), std::make_pair(gx, gy));
-      if (it == valid_locs.end()) continue;
+      if (it == valid_locs.end())
+        continue;
 
       int idx = static_cast<int>(std::distance(valid_locs.begin(), it));
       buckets[idx].push_back(kp);
@@ -147,11 +140,9 @@ public:
     /* ---------- 6. collect top keypoints per bucket ---------- */
     pts.clear();
     for (auto &vec : buckets) {
-      if (vec.empty()) continue;
-      std::sort(vec.begin(), vec.end(),
-                [](const cv::KeyPoint &a, const cv::KeyPoint &b) {
-                  return a.response > b.response;
-                });
+      if (vec.empty())
+        continue;
+      std::sort(vec.begin(), vec.end(), [](const cv::KeyPoint &a, const cv::KeyPoint &b) { return a.response > b.response; });
       if (vec.size() > (size_t)num_features_grid) {
         vec.resize(num_features_grid);
       }
@@ -163,27 +154,23 @@ public:
       return;
     }
 
-    /* ---------- 7. sub-pixel refinement ---------- */
+    /* ---------- 7. sub-pixel refinement (GPU) ---------- */
     std::vector<cv::Point2f> pts_refined;
     pts_refined.reserve(pts.size());
     for (auto &k : pts) {
       pts_refined.emplace_back(k.pt);
     }
 
-    cv::cornerSubPix(
-      gray,
-      pts_refined,
-      cv::Size(5, 5),
-      cv::Size(-1, -1),
-      cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.001)
-    );
+    cv::cuda::Stream subpix_stream;
+    cv::cuda::GpuMat d_gray(gray);
+    refineSubpixGPU(d_gray, pts_refined, cv::Size(5, 5), subpix_stream);
 
     for (size_t i = 0; i < pts.size(); ++i) {
       pts[i].pt = pts_refined[i];
     }
   }
-};  // class Grider_GRID
+}; // class Grider_GRID
 
-}  // namespace ov_core
+} // namespace ov_core
 
-#endif  // OV_CORE_GRIDER_GRID_H
+#endif // OV_CORE_GRIDER_GRID_H
