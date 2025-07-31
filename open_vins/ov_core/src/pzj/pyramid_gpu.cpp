@@ -30,7 +30,7 @@ void buildPyramidGPU(const cv::cuda::GpuMat &img0, std::vector<cv::cuda::GpuMat>
     // ② pyrDown
     cv::Size half((roi_sz.width + 1) >> 1, (roi_sz.height + 1) >> 1);
     cv::cuda::GpuMat half_roi;
-    cv::cuda::pyrDown(prev_roi, half_roi, half, stream);
+    cv::cuda::pyrDown(prev_roi, half_roi, stream);
 
     // ③ 再补边（异步调用）
     cv::cuda::copyMakeBorder(half_roi, pyr[l], pad_y, pad_y, pad_x, pad_x, cv::BORDER_REFLECT101, cv::Scalar(), stream);

@@ -11,10 +11,7 @@ namespace ov_core {
 /// @param levels 金字塔层数（含 level-0）
 /// @param winSize Lucas-Kanade 光流窗口大小 (必须与后续 LK 调用保持一致)
 /// @param stream  CUDA stream，可缺省
-void buildPyramidGPU(const cv::cuda::GpuMat& img0,
-                     std::vector<cv::cuda::GpuMat>& pyr,
-                     int levels,
-                     const cv::Size& winSize,
-                     cv::cuda::Stream& stream = cv::cuda::Stream::Null());
+void buildPyramidGPU(const cv::cuda::GpuMat &img0, std::vector<cv::cuda::GpuMat> &pyr, int levels, const cv::Size &winSize,
+                     cv::cuda::Stream &stream = cv::cuda::Stream::Null());
 
 } // namespace ov_core
